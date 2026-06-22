@@ -1,6 +1,8 @@
 # Hermes Trading Platform
 
-**v10.7** — Multi-thesis automated paper trading system. 3 theses. 29 signals. 10 quant modules. Risk engine with auto-execute. Dashboard on port 8501.
+**v11.0** (v12.0 PLANNING) — Multi-thesis automated paper trading system. 3 theses, 29 signals, 10 quant modules, 3 isolated $100K engines (crypto/commodity/AI). Risk engine with auto-execute. Dashboard on port 8501.
+
+> **Version history:** [VERSION_AUDIT.md](VERSION_AUDIT.md) — v0→v12 chronicled with every decision, bug fix, and data source change. **AGENTS.md** for schema + phase plan. **ARCHITECTURE.md** for full system reference.
 
 ---
 
@@ -89,13 +91,16 @@ python3 learning/missed-audit.py --summary         # Missed opportunity audit
 
 ## Version
 
-**v10.7** (May 20, 2026). Full history: [VERSION_AUDIT.md](VERSION_AUDIT.md)
+**v11.0** (May 24, 2026) — Platform consolidated: 21 fixes, Hyperliquid migration, Kalman filter, standalone engines, signal fidelity monitor.
+**v12.0** — PLANNING: 3-isolated $100K engines, crypto thesis rebuilt (Fink "Institutional Inevitability"), quant+intraday complete redesign, per-engine meta-optimizers.
+
+Full history: [VERSION_AUDIT.md](VERSION_AUDIT.md) — every session, decision, bug fix, and data source change from v0 (May 16) through v12 plan.
 
 | File | Purpose |
 |------|---------|
-| `AGENTS.md` | Schema + design rules |
+| `AGENTS.md` | Schema + design rules + phase plan |
 | `ARCHITECTURE.md` | Full system reference |
-| `VERSION_AUDIT.md` | Version history |
+| `VERSION_AUDIT.md` | Version history (single source of truth) |
 | `paper-trader/rules.md` | Trading rules + learning log |
 
 ---
@@ -103,8 +108,8 @@ python3 learning/missed-audit.py --summary         # Missed opportunity audit
 ## Current State
 
 ```
-28 Python files · 8-step polling · 10 quant modules + MC + ensemble
-3 theses · 29 signals · Risk engine v1.1 · Dashboard v3.2
-20 crons · 3 tmux sessions · 0 pending gaps
-9 positions · $67.6K deployed
+v11.0 platform. 3 theses. 29 signals. 10 quant modules + MC + ensemble + Kalman.
+3 standalone engines. 8-step polling. Risk engine v1.0. Dashboard v3.2.
+21 fixes in v11.0 audit. Hyperliquid data layer. Standalone quant + intraday journals.
+21 crons healthy. 0 pending gaps (P3 cosmetic items remain).
 ```
