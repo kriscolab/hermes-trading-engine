@@ -1,0 +1,25 @@
+{
+  "generated_at": "2026-05-21 01:20 IST",
+  "version": "v1.0",
+  "trade_analysis": {
+    "total_closed": 0,
+    "by_thesis": {}
+  },
+  "ensemble_weights": {
+    "mean-reversion": 0.3,
+    "momentum": 0.4,
+    "correlation": 0.6000000000000001,
+    "stat-arbitrage": 0.3,
+    "monte-carlo": 0.7,
+    "volatility-arbitrage": 0.3,
+    "ml-signals": 0.7,
+    "event-driven": 0.3,
+    "market-making": 0.7,
+    "microstructure": 0.7
+  },
+  "recommendations": {
+    "entry": "No closed trades yet \u2014 insufficient data for threshold calibration",
+    "risk": "Default regime-adaptive TP/SL active"
+  },
+  "status": "cold_start"
+}

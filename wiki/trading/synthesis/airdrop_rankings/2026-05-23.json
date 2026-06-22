@@ -1,0 +1,128 @@
+{
+  "date": "2026-05-23",
+  "generated_at": "2026-05-23 02:00 IST",
+  "live_data": false,
+  "top_n": 5,
+  "rankings": [
+    {
+      "rank": 1,
+      "name": "LayerZero",
+      "protocol": "LayerZero",
+      "status": "confirmed",
+      "tvl_m": 0,
+      "funding_m": 293,
+      "days_until": 30,
+      "team_public": true,
+      "vc_tier": "tier1",
+      "audits": 3,
+      "age_months": 30,
+      "chain": "Multi-chain",
+      "notes": "Cross-chain interoperability protocol. $293M raised. Confirmed airdrop snapshot taken.",
+      "scores": {
+        "likelihood": 30,
+        "est_value": 25,
+        "time_to_claim": 15,
+        "team_backers": 15,
+        "rug_risk_inverse": 15
+      },
+      "total_score": 100,
+      "tier": "S"
+    },
+    {
+      "rank": 2,
+      "name": "zkSync",
+      "protocol": "zkSync",
+      "status": "confirmed",
+      "tvl_m": 800,
+      "funding_m": 458,
+      "days_until": 45,
+      "team_public": true,
+      "vc_tier": "tier1",
+      "audits": 4,
+      "age_months": 24,
+      "chain": "Ethereum L2",
+      "notes": "ZK-rollup L2. $458M raised. Token generation event announced.",
+      "scores": {
+        "likelihood": 30,
+        "est_value": 25,
+        "time_to_claim": 10,
+        "team_backers": 15,
+        "rug_risk_inverse": 15
+      },
+      "total_score": 95,
+      "tier": "S"
+    },
+    {
+      "rank": 3,
+      "name": "Berachain",
+      "protocol": "Berachain",
+      "status": "confirmed",
+      "tvl_m": 0,
+      "funding_m": 142,
+      "days_until": 60,
+      "team_public": true,
+      "vc_tier": "tier1",
+      "audits": 2,
+      "age_months": 24,
+      "chain": "Cosmos",
+      "notes": "L1 with Proof-of-Liquidity. $142M raised. Testnet active.",
+      "scores": {
+        "likelihood": 30,
+        "est_value": 25,
+        "time_to_claim": 10,
+        "team_backers": 15,
+        "rug_risk_inverse": 11
+      },
+      "total_score": 91,
+      "tier": "S"
+    },
+    {
+      "rank": 4,
+      "name": "StarkNet",
+      "protocol": "StarkNet",
+      "status": "likely",
+      "tvl_m": 600,
+      "funding_m": 282,
+      "days_until": 60,
+      "team_public": true,
+      "vc_tier": "tier1",
+      "audits": 3,
+      "age_months": 36,
+      "chain": "Ethereum L2",
+      "notes": "ZK-STARK L2. STRK token launched, airdrop rounds continue.",
+      "scores": {
+        "likelihood": 20,
+        "est_value": 25,
+        "time_to_claim": 10,
+        "team_backers": 15,
+        "rug_risk_inverse": 15
+      },
+      "total_score": 85,
+      "tier": "S"
+    },
+    {
+      "rank": 5,
+      "name": "EigenLayer",
+      "protocol": "EigenLayer",
+      "status": "likely",
+      "tvl_m": 12000,
+      "funding_m": 164,
+      "days_until": 90,
+      "team_public": true,
+      "vc_tier": "tier1",
+      "audits": 5,
+      "age_months": 18,
+      "chain": "Ethereum",
+      "notes": "Restaking protocol. $12B TVL. Multiple airdrop seasons expected.",
+      "scores": {
+        "likelihood": 20,
+        "est_value": 25,
+        "time_to_claim": 10,
+        "team_backers": 15,
+        "rug_risk_inverse": 15
+      },
+      "total_score": 85,
+      "tier": "S"
+    }
+  ]
+}

@@ -1,0 +1,782 @@
+#!/usr/bin/env python3
+"""
+Hermes Trading Dashboard v3.2 — The Interface
+===============================================
+Tabbed dashboard: Dashboard | Architecture | Data Sources | Edge Lab | Analytics | Changelog
+
+Design principle: Tell the story of each thesis end-to-end.
+A layman should understand what we believe, how we measure it, and what we're doing.
+"""
+
+import streamlit as st
+import sqlite3, json, time, pandas as pd
+from datetime import datetime, timezone, timedelta
+from pathlib import Path
+
+IST = timezone(timedelta(hours=5, minutes=30))
+TRADING = Path(__file__).resolve().parent.parent
+DB_PATH = TRADING / "paper-trader" / "journal.db"
+PRICES_PATH = Path("/tmp/portfolio_prices.json")
+CRYPTO_PATH = Path("/tmp/crypto_module_data.json")
+MARKET_PATH = Path("/tmp/live_market_data.json")
+QUANT_PATH = Path("/tmp/quant_signals.json")
+EDGE_PATH = Path("/tmp/edge_generator.json")
+FRESH_PATH = Path("/tmp/data_freshness.json")
+RISK_PATH = Path("/tmp/risk_alerts.json")
+
+st.set_page_config(page_title="Hermes Trading", page_icon="📊", layout="wide")
+
+# ── Helpers ──────────────────────────────────────────────────────────
+def now_ist(): return datetime.now(IST)
+def badge(e, d=""):
+    if e >= 60: c, m = "#10b981", "🟢"
+    elif e >= 40: c, m = "#f59e0b", "🟡"
+    else: c, m = "#64748b", "⚫"
+    if any(x in str(d).upper() for x in ["SELL","BEAR","SHORT"]): m = "🔴"
+    return f'<span style="color:{c};font-weight:bold">{m} {e}</span>'
+def pnl_str(v):
+    if v > 0: return f'<span style="color:#10b981">+${v:,.0f}</span>'
+    if v < 0: return f'<span style="color:#ef4444">-${abs(v):,.0f}</span>'
+    return '$0'
+def conc_bar(s, mx=6):
+    p = s/mx*100; c = "#10b981" if s>=3 else ("#f59e0b" if s>=2 else "#ef4444")
+    return f'<div style="background:#1e293b;border-radius:3px;height:5px;margin:3px 0"><div style="background:{c};border-radius:3px;height:5px;width:{p}%"></div></div>'
+
+THESIS_MAP = {
+    "E1":"commodity","E2":"commodity","E3":"commodity","E4S":"commodity","E4L":"commodity",
+    "X1":"commodity","X2":"commodity","X3":"commodity","X4":"commodity","X5":"commodity",
+    "CRYPTO_E1":"crypto","CRYPTO_E2":"crypto","CRYPTO_E3":"crypto","CRYPTO_E4":"crypto",
+    "CRYPTO_X1":"crypto","CRYPTO_X2":"crypto","CRYPTO_X3":"crypto","CRYPTO_X4":"crypto","CRYPTO_X5":"crypto",
+    "AI_E1":"ai","AI_E2":"ai","AI_E3":"ai","AI_E4":"ai","AI_E5":"ai",
+    "AI_X1":"ai","AI_X2":"ai","AI_X3":"ai","AI_X4":"ai","AI_X5":"ai",
+}
+THESIS_LABEL = {"commodity":"🛢️ Commodity Super Cycle","crypto":"🪙 Crypto Accumulation","ai":"🤖 AI Supercycle"}
+THESIS_EMOJI = {"commodity":"🛢️","crypto":"🪙","ai":"🤖"}
+
+# ── Data Loader ─────────────────────────────────────────────────────
+@st.cache_data(ttl=20)
+def load_data():
+    conn = sqlite3.connect(str(DB_PATH)); conn.row_factory = sqlite3.Row
+    
+    positions = [dict(r) for r in conn.execute(
+        "SELECT id,symbol,direction,entry_price,shares,trade_date,entry_signal FROM trades WHERE status='open' ORDER BY trade_date").fetchall()]
+    closed_all = [dict(r) for r in conn.execute(
+        "SELECT * FROM trades WHERE status='closed' AND exit_signal NOT IN ('AUDIT_PURGE','VERIFY_PURGE') ORDER BY exit_date DESC LIMIT 50").fetchall()]
+    siglog = [dict(r) for r in conn.execute(
+        "SELECT signal_id,triggered,executed,check_date,thesis_id FROM signal_log ORDER BY check_date DESC LIMIT 50").fetchall()]
+    conn.close()
+    
+    prices = {}; crypto = {}
+    if PRICES_PATH.exists(): 
+        try: prices = json.loads(PRICES_PATH.read_text())
+        except: pass
+    if CRYPTO_PATH.exists():
+        try: crypto = json.loads(CRYPTO_PATH.read_text())
+        except: pass
+        sbtc = crypto.get("prices",{}).get("btc",0); seth = crypto.get("prices",{}).get("eth",0)
+        if sbtc and "IBIT" in prices: prices["IBIT"] = sbtc
+        if seth and "ETHA" in prices: prices["ETHA"] = seth
+    
+    upnl_total = 0.0
+    for p in positions:
+        mkt = prices.get(p["symbol"], p["entry_price"])
+        p["current_price"] = mkt
+        p["unrealized_pnl"] = (p["entry_price"]-mkt)*p["shares"] if p["direction"]=="short" else (mkt-p["entry_price"])*p["shares"]
+        upnl_total += p["unrealized_pnl"]
+        p["thesis"] = THESIS_MAP.get(p["entry_signal"], "other")
+    
+    deployed = sum(p["entry_price"]*p["shares"] for p in positions)
+    realized = sum(t["pnl_realized"] for t in closed_all if t["pnl_realized"])
+    cash = 100_000 - deployed + realized
+    
+    latest_firing = {}
+    for s in siglog:
+        if s["triggered"] and s["signal_id"] not in latest_firing:
+            # Only consider signals from the last 6 hours — older triggers are stale
+            try:
+                check_time = datetime.strptime(s["check_date"], "%Y-%m-%d %H:%M")
+                if (datetime.now() - check_time).total_seconds() > 6 * 3600:
+                    continue
+            except: pass
+            # Check if signal actually has an open position (source of truth, not signal_log)
+            has_position = any(p["entry_signal"] == s["signal_id"] for p in positions)
+            latest_firing[s["signal_id"]] = {"thesis":s.get("thesis_id","?"),"executed": has_position}
+    
+    quant = {}; edge = {}
+    if QUANT_PATH.exists(): 
+        try: quant = json.loads(QUANT_PATH.read_text())
+        except: pass
+    if EDGE_PATH.exists():
+        try: edge = json.loads(EDGE_PATH.read_text())
+        except: pass
+    
+    freshness = {}
+    if FRESH_PATH.exists():
+        try: freshness = json.loads(FRESH_PATH.read_text())
+        except: pass
+    
+    risk = {}
+    if RISK_PATH.exists():
+        try: risk = json.loads(RISK_PATH.read_text())
+        except: pass
+    
+    prices_age = None
+    if PRICES_PATH.exists(): prices_age = datetime.fromtimestamp(PRICES_PATH.stat().st_mtime, tz=IST)
+    
+    return {
+        "positions":positions, "closed":closed_all, "siglog":siglog,
+        "cash":cash, "deployed":deployed, "equity":cash+deployed,
+        "realized_pnl":realized, "unrealized_pnl":upnl_total,
+        "risk": risk,
+        "latest_firing":latest_firing,
+        "crypto":crypto, "quant":quant, "edge":edge,
+        "freshness":freshness, "prices_age":prices_age, "now":now_ist(),
+    }
+
+# ── Load ─────────────────────────────────────────────────────────────
+d = load_data()
+f = d["freshness"]
+
+# ── Title Bar ────────────────────────────────────────────────────────
+st.title("📊 Hermes Trading")
+age_sec = time.time() - f.get("timestamp_epoch",0)
+age_min = int(age_sec//60)
+dot = "🟢" if age_min<5 else ("🟡" if age_min<10 else "🔴")
+st.caption(f"Data: {dot} {age_min}m ago · {d['now'].strftime('%b %d %H:%M IST')} · Auto-refresh 20s")
+
+# ── Tabs ─────────────────────────────────────────────────────────────
+tabs = st.tabs(["📊 Dashboard", "📐 Architecture", "📡 Data Sources", "🤖 Edge Lab", "📈 Analytics", "📋 Changelog"])
+
+# ══════════════════════════════════════════════════════════════════════
+# TAB 1: DASHBOARD
+# ══════════════════════════════════════════════════════════════════════
+with tabs[0]:
+    # ── Portfolio Header ──
+    st.subheader("Portfolio")
+    c1,c2,c3,c4,c5 = st.columns(5)
+    c1.metric("Equity", f"${d['equity']+d['unrealized_pnl']:,.0f}", f"${d['cash']:,.0f} cash")
+    c2.metric("Deployed", f"${d['deployed']:,.0f}", f"{d['deployed']/1000:.0f}%")
+    c3.metric("Unrealized P&L", f"${d['unrealized_pnl']:+,.0f}")
+    c4.metric("Realized P&L", f"${d['realized_pnl']:+,.0f}")
+    c5.metric("Positions", len(d["positions"]))
+    
+    # ── Open Positions Table ──
+    st.subheader("Open Positions")
+    if d["positions"]:
+        rows = []
+        for p in d["positions"]:
+            mkt = p.get("current_price", p["entry_price"])
+            upnl = p.get("unrealized_pnl",0)
+            chg = ((mkt-p["entry_price"])/p["entry_price"]*100)
+            if p["direction"]=="short": chg = -chg
+            # Store numeric UPNL for sorting
+            rows.append({
+                "Sym": p["symbol"], "Dir": p["direction"].upper(),
+                "Thesis": p.get("thesis","?")[:3].upper(),
+                "Entered": str(p.get("trade_date","?"))[:16],
+                "Entry": p["entry_price"], "Mkt": mkt, "Chg": chg,
+                "Qty": p["shares"], "Value": mkt*p["shares"],
+                "UPNL_num": upnl, "Signal": p["entry_signal"],
+            })
+        df = pd.DataFrame(rows)
+        # Format for display
+        disp = df.copy()
+        disp["Entry"] = disp["Entry"].apply(lambda x: f"${x:,.2f}")
+        disp["Mkt"] = disp["Mkt"].apply(lambda x: f"${x:,.2f}")
+        disp["Chg"] = disp["Chg"].apply(lambda x: f"{x:+.1f}%")
+        disp["Qty"] = disp["Qty"].apply(lambda x: f"{x:,.2f}")
+        disp["Value"] = disp["Value"].apply(lambda x: f"${x:,.0f}")
+        disp["UPNL"] = disp["UPNL_num"].apply(lambda x: f"${x:+,.0f}")
+        disp = disp[["Sym","Dir","Thesis","Entered","Entry","Mkt","Chg","Qty","Value","UPNL","Signal"]]
+        st.dataframe(disp, hide_index=True, use_container_width=True,
+                     column_config={"UPNL": st.column_config.TextColumn("UPNL", help="Unrealized P&L")})
+        if d.get("prices_age"):
+            st.caption(f"📊 Prices as of {d['prices_age'].strftime('%b %d %H:%M IST')} · Refresh: fetch-prices.py --portfolio")
+        st.caption("**Legend:** Sym = Symbol · Dir = Direction · Qty = Quantity · UPNL = Unrealized P&L · Chg = % Change · Mkt = Market Price")
+    else:
+        st.info("No open positions.")
+
+    # ── Active Signals ──
+    firing = d["latest_firing"]
+    if firing:
+        parts = []; unexec = []
+        for sid, info in firing.items():
+            parts.append(f"{'✅' if info['executed'] else '⚠️'} {sid}")
+            if not info["executed"]: unexec.append(sid)
+        st.success("**FIRING:** " + " · ".join(parts))
+        if unexec: st.warning(f"Triggered but NOT executed: {', '.join(unexec)} — check engine log")
+    else:
+        st.info("No signals firing.")
+
+    # ── Risk Alerts ──
+    risk_data = d.get("risk", {})
+    risk_alerts = risk_data.get("alerts", [])
+    risk_summary = risk_data.get("summary", {})
+    if risk_alerts:
+        breaches = [a for a in risk_alerts if a["status"] in ("TP1_HIT", "TP2_HIT", "CRITICAL")]
+        warns = [a for a in risk_alerts if a["status"] == "WARN"]
+        if breaches or warns:
+            st.subheader("🛡️ Risk Alerts")
+            if breaches:
+                for a in breaches:
+                    icon = {"TP1_HIT":"📈","TP2_HIT":"🎯","CRITICAL":"🚨"}.get(a["status"],"⚠️")
+                    st.warning(f"{icon} **{a['symbol']}** {a['direction']}: {a['action']} — PnL: {a['pnl_pct']:+.1f}%")
+            if warns:
+                for a in warns:
+                    st.info(f"⚠️ **{a['symbol']}** {a['direction']}: {a['action']} — PnL: {a['pnl_pct']:+.1f}%")
+        st.caption(f"🛡️ Risk Engine v1.1 · {risk_summary.get('total_positions',0)} positions · T1: {risk_summary.get('tp1_hit',0)} · T2: {risk_summary.get('tp2_hit',0)} · Warnings: {risk_summary.get('warnings',0)}")
+    
+    # ── Trade History ──
+    if d["closed"]:
+        st.subheader("Trade History")
+        hrows = []
+        for t in d["closed"]:
+            pnl = t.get("pnl_realized") or 0
+            hrows.append({
+                "Sym": t["symbol"], "Dir": t["direction"],
+                "Entry": f"${t['entry_price']:,.2f}", "Exit": f"${t.get('exit_price',0):,.2f}",
+                "Entry Sig": t["entry_signal"], "Exit Sig": t.get("exit_signal","?"),
+                "PNL_num": pnl, "PNL": f"${pnl:+,.0f}",
+            })
+        st.dataframe(pd.DataFrame(hrows)[["Sym","Dir","Entry","Exit","Entry Sig","Exit Sig","PNL"]],
+                     hide_index=True, use_container_width=True)
+
+    st.markdown("---")
+
+    # ═══ THESIS SECTIONS ═══
+    thesis_data = {
+        "commodity": {
+            "belief": "Jeff Currie's 'Mag7→Mun7' thesis: AI buildout drives a commodity super-cycle. Energy and materials companies benefit as infrastructure spend accelerates. Brent crude is the barometer — above $100 signals demand pressure. Gold is the hedge — it rises when real rates fall or geopolitical risk spikes.",
+            "how": "E1: Brent pullback to 50-SMA + strong FCF → buy energy equities (XLE). E2: Brent breakout above $110 → enter at 50% allocation. E3: Energy sector weighting rising vs tech → rotation confirmed. E4S/E4L: Gold tactical short (overextended) vs structural long (below $3,000). Exits: Hormuz reopening (X1), capex cuts (X2), energy overweight (X3), contango (X4), FCF collapse (X5).",
+            "entry_signals": {"E1":"Brent < 50-SMA + FCF > 12%","E2":"Brent > $110","E3":"Energy weight > 4.5% or XLE/XLK higher low","E4S":"Gold > $3,800 + DXY rising","E4L":"Gold < $3,000 or CB dovish"},
+            "exit_signals": {"X1":"Hormuz reopens","X2":"Mag7 capex drops >30%","X3":"Energy > 10% of S&P","X4":"Brent contango 4w","X5":"FCF yield < 8%"},
+        },
+        "crypto": {
+            "belief": "Institutional accumulation thesis: After 2024-2025 retail hype, BTC and ETH are in quiet accumulation by ETFs, whales, and long-term holders. Exchange reserves at multi-year lows. Derivatives are neutral (not overheated). The 6-layer confluence model confirms: when 3+ layers align, institutions are buying. When 5+ align, a breakout is imminent.",
+            "how": "CRYPTO_E1: 3/6 layers confirm → enter BTC (60%) + ETH (40%) at 25% allocation. E2: 4/6 + whale accumulation → add 25%. E3: Price drops BUT flows rise (divergence) → highest conviction buy. E4: Breakout on volume + OI + skew → final 25%. Exits: reserves rising (X1), whale distribution (X2), derivatives overheat (X3), BTC/SPY correlation (X4), regulation (X5).",
+            "entry_signals": {"CRYPTO_E1":"3/6 layers confirm","CRYPTO_E2":"4/6 + whale accumulation","CRYPTO_E3":"BTC -5% + outflows + stablecoins","CRYPTO_E4":"30d high + vol 2x + OI + skew + reserves"},
+            "exit_signals": {"CRYPTO_X1":"Exchange reserves +5%","CRYPTO_X2":"Whale distribution 3%","CRYPTO_X3":"Derivatives overheat","CRYPTO_X4":"BTC/SPY corr > 0.7","CRYPTO_X5":"Regulatory shock"},
+        },
+        "ai": {
+            "belief": "Aschenbrenner's 'AGI 2027' thesis: AI infrastructure spending is the biggest capex cycle in history. Semiconductor supply chains, data center buildout, and power generation are the picks-and-shovels. We track 5 layer ETFs (SOXX semis, IGV software, DTCR data centers, TAN solar, XLC telecom) plus conviction stocks (INTC turnaround, BE nuclear, CORZ mining).",
+            "how": "AI_E1: SOXX breaks above 540 → enter 5-ETF basket at 25%. E2: Electrons layer (DTCR>32 + TAN>67) → overweight power. E3: INTC > 130 (turnaround) → single-stock conviction. E4: CORZ > 27 (data center buildout) → enter. E5: SOXX > 550 + IGV > 105 → cycle confirmed. Exits: semi glut (X1), spending cuts (X2), power regulation (X3), earnings miss (X4), tech rout (X5).",
+            "entry_signals": {"AI_E1":"SOXX > $540","AI_E2":"DTCR > $32 + TAN > $67","AI_E3":"INTC > $130","AI_E4":"CORZ > $27","AI_E5":"SOXX > $550 + IGV > $105"},
+            "exit_signals": {"AI_X1":"Semi glut","AI_X2":"AI spending cut","AI_X3":"Power regulation","AI_X4":"AI earnings miss","AI_X5":"Tech rout"},
+        },
+    }
+    
+    # Latest signal check per thesis
+    thesis_firing = {}
+    for th in ["commodity","crypto","ai"]:
+        thesis_firing[th] = {k:v for k,v in d["latest_firing"].items() if v.get("thesis","")==th}
+    
+    # Open positions per thesis
+    thesis_positions = {}
+    for p in d["positions"]:
+        th = p.get("thesis","other")
+        if th not in thesis_positions: thesis_positions[th] = []
+        thesis_positions[th].append(p)
+    
+    # Closed trades per thesis
+    thesis_closed = {}
+    for t in d["closed"]:
+        th = THESIS_MAP.get(t["entry_signal"],"other")
+        if th not in thesis_closed: thesis_closed[th] = []
+        thesis_closed[th].append(t)
+
+    for th, label in [("commodity","🛢️ Commodity Super Cycle"), ("crypto","🪙 Crypto Institutional Accumulation"), ("ai","🤖 AI Supercycle")]:
+        td = thesis_data[th]
+        st.subheader(label)
+        
+        # What we believe
+        with st.expander("📖 What We Believe — The Hypothesis", expanded=False):
+            st.markdown(td["belief"])
+            st.markdown("**How we measure it (Signal Ladder):**")
+            st.markdown(td["how"])
+        
+        # Signal Ladder
+        st.caption("**Signal Ladder**")
+        es = td["entry_signals"]; xs = td["exit_signals"]
+        firing_th = thesis_firing.get(th,{})
+        
+        ladder_cols = st.columns(2)
+        with ladder_cols[0]:
+            st.caption("Entries")
+            for sid, desc in es.items():
+                is_firing = sid in firing_th
+                is_exec = firing_th.get(sid,{}).get("executed",False)
+                icon = "✅" if is_exec else ("🔥" if is_firing else "⚫")
+                st.markdown(f"{icon} **{sid}**: {desc}")
+        with ladder_cols[1]:
+            st.caption("Exits")
+            for sid, desc in xs.items():
+                is_firing = sid in firing_th
+                icon = "🔴" if is_firing else "⚫"
+                st.markdown(f"{icon} **{sid}**: {desc}")
+        
+        # Open Positions for this thesis
+        tp = thesis_positions.get(th, [])
+        if tp:
+            st.caption("**Open Positions**")
+            prows = []
+            for p in tp:
+                mkt = p.get("current_price", p["entry_price"])
+                upnl = p.get("unrealized_pnl",0)
+                prows.append({"Sym":p["symbol"],"Dir":p["direction"].upper(),"Entered":str(p.get("trade_date","?"))[:16],
+                              "Entry":f"${p['entry_price']:,.2f}","Mkt":f"${mkt:,.2f}",
+                              "UPNL":f"${upnl:+,.0f}","Signal":p["entry_signal"]})
+            st.dataframe(pd.DataFrame(prows), hide_index=True, use_container_width=True)
+        else:
+            st.caption("No open positions for this thesis.")
+        
+        # Closed trades
+        tc = thesis_closed.get(th, [])
+        if tc:
+            st.caption("**Trade History**")
+            crows = [{"Sym":t["symbol"],"Dir":t["direction"],"Entry":f"${t['entry_price']:,.2f}",
+                      "Exit":f"${t.get('exit_price',0):,.2f}","PNL":f"${(t.get('pnl_realized') or 0):+,.0f}",
+                      "Signal":t["entry_signal"]} for t in tc[:10]]
+            st.dataframe(pd.DataFrame(crows), hide_index=True, use_container_width=True)
+        
+        # What's Next
+        st.caption("**What's Next**")
+        next_firing = [f"**{sid}** ({info['thesis']})" for sid,info in firing_th.items() if not info["executed"]]
+        if next_firing:
+            st.markdown(f"Signals closest to execution: {', '.join(next_firing)}")
+        else:
+            all_es = list(es.keys())
+            st.markdown(f"No signals currently firing. Monitoring: {', '.join(all_es[:3])}...")
+        
+        st.markdown("---")
+    
+    # ═══ QUANT CARDS ═══
+    st.subheader("Quant Intelligence")
+    qs = d["quant"].get("signals", {})
+    if qs:
+        MODULES = {
+            "mean-reversion": ("Mean Reversion", "Uses Bollinger Bands, RSI, and Z-score to detect when price is statistically extended. Edge: fade extremes when regime is mean-reverting."),
+            "momentum": ("Momentum / Trend", "EMA crossovers, ADX trend strength, Donchian breakouts, MACD. Edge: follow the trend when ADX > 25 and regime is TRENDING."),
+            "correlation": ("Cross-Asset Correlation", "BTC vs SPY, ETH vs BTC, SOL vs BTC. Edge: identify regime shifts — high BTC/SPY correlation means macro-driven, low means crypto-native."),
+            "stat_arbitrage": ("Statistical Arbitrage", "Pair trading with spread Z-scores. Edge: when spread deviates >2σ from mean, bet on convergence."),
+            "volatility-arbitrage": ("Volatility Arbitrage", "Parkinson range vol, vol-of-vol, regime classifier (EXPANDING/CONTRACTING/STABLE). Edge: fade vol spikes in STABLE, ride expansion in EXPANDING."),
+            "ml-signals": ("ML / Regime Detection", "Classifies market into TRENDING, MEAN_REVERTING, HIGH_VOL, LOW_VOL, CHOPPY, BREAKOUT. Recommends strategy. Edge: only trade compatible strategy for current regime."),
+            "event-driven": ("Event Driven", "OKX funding rate extremes, liquidation cascades. Edge: buy after long liquidation flush, sell after funding becomes prohibitively expensive."),
+            "market-making": ("Market Making", "OKX bid/ask spread analysis, spread/vol ratio. Edge: provide liquidity when spread compensates for adverse selection."),
+            "microstructure": ("Market Microstructure", "Amihud illiquidity, OFI proxy (close-location in range × volume), VWAP deviation. Edge: detect informed trader activity via order flow patterns."),
+        }
+        
+        # Per-ticker cards
+        for ticker in ["BTC","ETH","SOL","LINK"]:
+            ts = qs.get(ticker,{})
+            if not ts: continue
+            ml = ts.get("ml-signals",{})
+            regime = ml.get("dominant_regime","?")
+            strat = ml.get("recommended_strategy","?")
+            st.caption(f"**{ticker}** — Regime: {regime} → Strategy: {strat}")
+            
+            qcols = st.columns(4)
+            for i, (mod_name, (display_name, description)) in enumerate(MODULES.items()):
+                md = ts.get(mod_name, {})
+                edge = md.get("edge", md.get("edge_score", 0))
+                direction = md.get("direction", md.get("signal", ""))
+                with qcols[i % 4]:
+                    st.markdown(f"**{display_name}**  {badge(edge, direction)}", unsafe_allow_html=True)
+                    with st.expander("ℹ️"):
+                        st.caption(description)
+                        if mod_name == "ml-signals":
+                            st.caption(f"Anomalies: {md.get('anomalies',[])}")
+                        elif mod_name == "volatility-arbitrage":
+                            st.caption(f"Vol regime: {md.get('vol_regime','?')} | VoV: {md.get('vol_of_vol',0)}")
+                        elif mod_name == "microstructure":
+                            st.caption(f"Trade size: {md.get('trade_size_regime','?')}")
+    else:
+        st.caption("Quant data not loaded. Run quant-aggregator.py.")
+
+# ══════════════════════════════════════════════════════════════════════
+# TAB 2: ARCHITECTURE
+# ══════════════════════════════════════════════════════════════════════
+with tabs[2]:
+    st.subheader("System Architecture")
+    
+    st.markdown("""
+    ### Data Flow
+    
+    ```
+    ┌─────────────────────────────────────────────────────────┐
+    │                    POLLING DAEMON (5-min)                │
+    │  crypto → prices → AI tracker → quant+ensemble → edge → synthesizer │
+    └──────────┬──────────┬──────────────┬────────────────┬───┘
+               │          │              │                │
+               ▼          ▼              ▼                ▼
+    /tmp/crypto_  /tmp/live_   /tmp/quant_     /tmp/edge_
+    module_data   market_data  signals.json    generator.json
+    .json         .json
+               │          │              │                │
+               └──────────┴──────────────┴────────────────┘
+                                    │
+                    ┌───────────────┼───────────────┐
+                    ▼               ▼               ▼
+            engine.py         engine.py        engine.py
+            --thesis          --thesis          --thesis
+            commodity         crypto            ai
+                    │               │               │
+                    └───────────────┼───────────────┘
+                                    ▼
+                            journal.db
+                           (SQLite)
+                                    │
+                                    ▼
+                          streamlit_dashboard.py
+                               (port 8501)
+    ```
+    
+    ### Component Map
+    
+    | Layer | Component | File | Purpose |
+    |-------|-----------|------|---------|
+    | Data | Polling Daemon | `scripts/polling-daemon.py` | 5-min market refresh cycle |
+    | Data | Crypto Fetch | `scripts/crypto-data-fetch.py` | OKX+Deribit+DeFiLlama+CoinGecko |
+    | Data | Price Fetch | `scripts/fetch-prices.py` | yfinance OHLCV for all ETFs |
+    | Analysis | Quant Aggregator | `scripts/quant-aggregator.py` | Runs 10 quant modules + ensemble meta-model |
+    | Analysis | Edge Generator | `synthesis/edge-generator.py` | Unified edge scores |
+    | Execution | Paper Engine | `paper-trader/engine.py` | 3 thesis signal check + execute |
+    | Storage | Journal DB | `paper-trader/journal.db` | SQLite: trades, signal_log, snapshots |
+    | Delivery | Dashboard | `delivery/streamlit_dashboard.py` | This interface |
+    | Delivery | Formatter | `delivery/formatter.py` | 3 modes: alert/digest/report |
+    | Delivery | Telegram Crons | 20 cron jobs | Auto-delivery to @hermestradingdesk |
+    
+    ### Thesis Design
+    
+    Each thesis follows the same pattern:
+    1. **Hypothesis** — A falsifiable claim about market behavior
+    2. **Signal Ladder** — Ranked entry (E1→E5) and exit (X1→X5) signals
+    3. **Instruments** — Specific ETFs/stocks tracked for the thesis
+    4. **Engine** — Shared paper-trader engine evaluates signals against live data
+    5. **Execution** — Auto-execute via daily cron with 80% cross-thesis cap
+    
+    ### 6-Layer Crypto Confluence
+    
+    ```
+    L1  MARKET STRUCTURE   price-action + volume-profile
+    L2  DERIVATIVES        funding + OI (OKX)
+    L3  OPTIONS            IV skew + term (Deribit)
+    L4  LIQUIDATIONS       liquidation data (OKX)
+    L5  ON-CHAIN           DeFi TVL proxy (DeFiLlama)
+    L6  MACRO/SENTIMENT    DXY, VIX, Fear & Greed
+    ```
+    
+    Entry threshold: 3/6 layers must confirm.
+    """)
+
+# ══════════════════════════════════════════════════════════════════════
+# TAB 4: DATA SOURCES
+# ══════════════════════════════════════════════════════════════════════
+with tabs[3]:
+    st.subheader("Data Sources — Comprehensive Audit")
+    
+    st.markdown("""
+    ### What data we have, what we use, and what we don't use (yet)
+    
+    This is our system check. For every data source, we document available fields,
+    what we consume, and opportunities we're leaving on the table.
+    """)
+    
+    data_sources = [
+        ("OKX Public API", "Crypto derivatives + spot", "FREE, global, no key",
+         ["Funding rate (BTC/ETH/SOL swaps)", "Open interest (BTC/ETH/SOL)", "Liquidation orders (BTC/ETH/SOL)", "Ticker bid/ask (BTC/ETH/SOL/LINK/USDT)"],
+         ["Mark price / index price", "Order book depth (bids/asks L2)", "Candlestick history (OHLCV)", "24h stats (high/low/volume)", "Funding rate history"],
+         "Mark/index price redundant with yfinance. Order book needs tick-level infra we don't have. OHLCV covered by yfinance. 24h stats available but not wired. Funding history would improve backtesting."),
+        
+        ("Deribit Public API", "Crypto options", "FREE, global, no key",
+         ["BTC 25-delta IV skew", "ETH 25-delta IV skew"],
+         ["Full options chain (strikes/expiries)", "Greeks (delta/gamma/theta/vega)", "Term structure (multiple expiries)", "Historical volatility data", "Put/Call ratio by strike"],
+         "Full options chain available but requires significant parsing. Term structure would improve vol-arb module. Greeks would enable proper options pricing. Currently only using top-level skew signal."),
+        
+        ("DeFiLlama API", "DeFi TVL + protocols", "FREE, no key",
+         ["Total TVL (all chains)", "TVL 7-day change %"],
+         ["Per-chain TVL breakdown", "Per-protocol TVL", "Stablecoin market caps", "Inflows/outflows by chain", "Yield data"],
+         "Per-chain data available but not wired. Stablecoin caps would improve crypto E3 signal (stablecoin_rise condition). Yield data would feed airdrop scanner with real numbers."),
+        
+        ("CoinGecko API", "Crypto prices + metadata", "FREE tier",
+         ["BTC, ETH, SOL, LINK, AVAX spot prices", "BTC Dominance %", "24h price change"],
+         ["7d/30d/1y price change", "Market cap rankings", "Exchange volume data", "Trending coins", "Developer/community stats"],
+         "Historical changes would let us compute btc_drop_5pct for E3 signal. Market cap data would improve correlation module. Volume data would feed volume_2x condition for E4."),
+        
+        ("alternative.me API", "Fear & Greed Index", "FREE, no key",
+         ["Fear & Greed value (0-100)", "F&G classification"],
+         ["Historical F&G values", "F&G components (volatility, momentum, social, etc.)"],
+         "Historical F&G would improve backtesting. Component breakdown would refine sentiment module."),
+        
+        ("KuCoin API", "Backup crypto prices", "FREE, global",
+         ["BTC, ETH spot prices (backup)"],
+         ["Full ticker list", "Order book", "Trade history"],
+         "Used only as fallback when CoinGecko fails. Could be primary for some pairs."),
+        
+        ("yfinance", "Equity/ETF/Commodity prices", "FREE, 15min delay on futures",
+         ["All ETF prices (GLD, XLE, SOXX, IGV, DTCR, TAN, XLC, IBIT, ETHA, XLK)", "Brent crude (BZ=F)", "Gold futures (GC=F)", "DXY (DX-Y.NYB)", "VIX (^VIX)", "Individual stocks (XOM, CVX, AAPL, etc.)"],
+         ["Fundamentals (P/E, EPS, FCF yield)", "Earnings dates", "Dividend history", "Options chain", "Intraday data"],
+         "Fundamentals partially used (FCF yield via fixed estimate). Earnings dates would improve AI thesis event detection. Options chain would supplement Deribit."),
+        
+        ("FRED (via yfinance proxy)", "Macro data", "FREE",
+         ["Real rates (10Y - breakeven inflation, estimated)"],
+         ["TIPS yield (DGS10)", "Breakeven inflation (T10YIE)", "Fed funds rate", "CPI/PCE data", "Industrial production"],
+         "Currently using 'real_rates': 'unknown' in market data. FRED direct access would give real-time real rates for gold thesis. Fed funds path would improve macro module."),
+    ]
+    
+    for name, desc, cost, used, not_used, why in data_sources:
+        with st.expander(f"{name} — {desc} ({cost})"):
+            st.caption("✅ **What we use:**")
+            for u in used:
+                st.markdown(f"- {u}")
+            st.caption("❌ **Available but NOT used:**")
+            for nu in not_used:
+                st.markdown(f"- {nu}")
+            st.caption(f"💡 **Why not:** {why}")
+    
+    # File freshness
+    st.subheader("Data File Status")
+    data_files = [
+        ("/tmp/quant_signals.json", "Quant aggregator output"),
+        ("/tmp/crypto_module_data.json", "Crypto 6-layer data"),
+        ("/tmp/live_market_data.json", "Commodity market data"),
+        ("/tmp/portfolio_prices.json", "Portfolio mark-to-market"),
+        ("/tmp/data_freshness.json", "Polling daemon heartbeat"),
+        ("/tmp/edge_generator.json", "Unified edge generator"),
+        ("/tmp/ai_tracker_prices.json", "AI ETF prices"),
+    ]
+    frows = []
+    for fp, desc in data_files:
+        p = Path(fp)
+        if p.exists():
+            age_m = (datetime.now()-datetime.fromtimestamp(p.stat().st_mtime)).total_seconds()/60
+            frows.append({"File": p.name, "Size": f"{p.stat().st_size:,}B", "Age": f"{age_m:.0f}m", "Status": "🟢" if age_m<15 else ("🟡" if age_m<60 else "🔴"), "Description": desc})
+        else:
+            frows.append({"File": p.name, "Size": "—", "Age": "—", "Status": "❌", "Description": desc})
+    st.dataframe(pd.DataFrame(frows), hide_index=True, use_container_width=True)
+
+# ══════════════════════════════════════════════════════════════════════
+# TAB 5: EDGE LAB
+# ══════════════════════════════════════════════════════════════════════
+with tabs[4]:
+    st.subheader("🤖 Edge Lab — Quant + Thesis Convergence")
+    
+    ed = d["edge"]
+    if ed:
+        st.metric("Market Regime", ed.get("market_regime","?"))
+        port = ed.get("portfolio",{})
+        st.caption(f"Deployed: ${port.get('deployed',0):,.0f} ({port.get('allocation_pct',0):.0f}%) · "
+                   f"Available: ${port.get('remaining',0):,.0f}")
+        
+        recs = ed.get("recommendations",[])
+        if recs:
+            st.subheader("Unified Edge Scores")
+            erows = []
+            for r in recs:
+                ric = {"BUY":"🟢","SELL":"🔴","WATCH":"🟡","WAIT":"⚫","HOLD_LONG":"🔒","HOLD_SHORT":"🔒"}.get(r["recommendation"],"?")
+                erows.append({
+                    "": f"{'📊' if r.get('has_position') else ''}{ric}",
+                    "Ticker": r["ticker"], "Score": f'{r["unified_score"]:.0f}',
+                    "Recommendation": r["recommendation"],
+                    "Quant Signals": ", ".join(r.get("quant_signals",[])[:3]) or "—",
+                    "Thesis Signals": ", ".join(r.get("thesis_signals",[])) or "—",
+                    "Crypto Conc": r.get("crypto_confluence",0),
+                })
+            st.dataframe(pd.DataFrame(erows), hide_index=True, use_container_width=True)
+            st.caption("Score = 40% quant edges + 35% thesis signals + 25% crypto confluence")
+        
+        # Monte Carlo status
+        st.subheader("Monte Carlo Gatekeeper")
+        st.markdown("""
+        **Current state:** Regime-filtered MC with direction awareness (v10.1+, wired v10.5). Only validates strategies in compatible regimes:
+        - Momentum → TRENDING, BREAKOUT (direction-aware: tests SHORT when ML says SELL)
+        - Mean Reversion → MEAN_REVERTING, CHOPPY
+        - Vol Arb → HIGH_VOL, EXPANDING
+        
+        **Live results:** SHORT momentum showing positive Sharpe (+0.4 to +1.3) but p-values still > 0.05 — no stat-sig edge yet. MC gatekeeper correctly rejecting signals in this bear-leaning market.
+        Ensemble meta-model (module #10) active: 4 tickers scored, weights adapt to signal quality.
+        """)
+    else:
+        st.caption("Edge generator not yet run. Added to polling daemon 5-min cycle.")
+
+    # ── Edge Q&A Bot ──
+    st.divider()
+    st.subheader("💬 Ask About Your Edges")
+    st.caption("Ask me about edge scores, regime, ensemble signals, or compare tickers.")
+    
+    # Build rich context from current data
+    edge_ctx = {
+        "regime": ed.get("market_regime", "UNKNOWN") if ed else "N/A",
+        "risk": ed.get("risk_factor", "?") if ed else "?",
+        "recommendations": ed.get("recommendations", []) if ed else [],
+        "ensemble": d["quant"].get("ensemble", {}).get("signals", {}) if d["quant"] else {},
+        "positions": d["positions"],
+        "thesis_biases": d.get("thesis_biases", {}),
+    }
+    
+    def answer_edge(question: str, ctx: dict) -> str:
+        q = question.lower()
+        
+        # "Why is X showing BULLISH?"
+        if "why" in q and ("bullish" in q or "bearish" in q or "neutral" in q):
+            for tkr in ["btc", "eth", "sol", "link", "soxx", "igv", "dtcr", "tan", "xle", "gld"]:
+                if tkr in q:
+                    tkr_up = tkr.upper()
+                    # Ensemble data
+                    ens = ctx["ensemble"].get(tkr_up, {})
+                    if ens:
+                        dir_ = ens.get("direction", "?")
+                        score = ens.get("ensemble_score", 0)
+                        mods = ens.get("module_scores", {})
+                        top_mods = sorted(mods.items(), key=lambda x: abs(x[1]), reverse=True)[:3]
+                        mod_str = ", ".join(f"{m}={v:+.2f}" for m, v in top_mods)
+                        return (f"**{tkr_up}** ensemble score: **{score:+.3f}** ({dir_})\n\n"
+                                f"Top contributing modules: {mod_str}\n"
+                                f"Long signals: {ens.get('long_modules',0)}, Short: {ens.get('short_modules',0)}\n\n"
+                                f"The ensemble weights all 10 quant modules. "
+                                f"{'Bullish because most modules agree on upside.' if dir_ == 'BULLISH' else 'Bearish — modules see downside pressure.' if dir_ == 'BEARISH' else 'Mixed signals — no clear consensus yet.'}")
+                    # Fall back to edge generator
+                    for r in ctx["recommendations"]:
+                        if r["ticker"] == tkr_up:
+                            return (f"**{tkr_up}** edge score: {r['unified_score']:.0f} → **{r['recommendation']}**\n\n"
+                                    f"Quant: {', '.join(r.get('quant_signals',[]) or ['—'])}\n"
+                                    f"Thesis: {', '.join(r.get('thesis_signals',[]) or ['—'])}\n"
+                                    f"Crypto confluence: {r.get('crypto_confluence', 0)}/6\n\n"
+                                    f"Weight: 40% quant + 35% thesis + 25% crypto confluence")
+                    return f"No edge data for **{tkr_up}**. It may not be in the current quant/trading universe."
+        
+        # "What's the regime?"
+        if "regime" in q and ("what" in q or "current" in q or "now" in q):
+            reg = ctx["regime"]
+            risk = ctx["risk"]
+            regime_guide = {
+                "TRENDING": "Markets are moving directionally. Momentum and trend-following strategies work best. Mean-reversion strategies are filtered out by MC.",
+                "RISK_ON": "Risk appetite is high. All strategies permitted, full position sizing. Crypto and growth likely outperform.",
+                "RISK_OFF": "Defensive posture. Reduce position sizes, tighten stops. MC filters out most long signals.",
+                "CAUTIOUS": "Mixed signals — some risk but not clear. Reduce size by 25-50%. Wait for confirmation.",
+                "NEUTRAL": "No strong directional signal. Range-bound strategies preferred. Default to thesis-driven entries only.",
+            }
+            guide = regime_guide.get(reg, "No specific guidance for this regime.")
+            return f"**Current regime: {reg}** | Risk: {risk}\n\n{guide}"
+        
+        # "Compare X vs Y"
+        if "compare" in q or "vs" in q:
+            tkrs = []
+            for t in ["btc", "eth", "sol", "link", "xle", "gld", "soxx"]:
+                if t in q: tkrs.append(t.upper())
+            if len(tkrs) >= 2:
+                lines = ["**Comparison:**\n"]
+                for t in tkrs:
+                    ens = ctx["ensemble"].get(t, {})
+                    rec = next((r for r in ctx["recommendations"] if r["ticker"] == t), {})
+                    lines.append(f"- **{t}**: ensemble {ens.get('ensemble_score', 0):+.3f} ({ens.get('direction','?')})"
+                                 f" | edge {rec.get('unified_score', 0):.0f} → {rec.get('recommendation', '?')}")
+                return "\n".join(lines)
+        
+        # "Show ensemble scores"
+        if "ensemble" in q or "all scores" in q or "top" in q:
+            ens = ctx["ensemble"]
+            if ens:
+                ranked = sorted(ens.items(), key=lambda x: x[1]["ensemble_score"], reverse=True)
+                lines = ["**Ensemble Rankings:**\n"]
+                for t, e in ranked:
+                    icon = "🟢" if e["direction"] == "BULLISH" else ("🔴" if e["direction"] == "BEARISH" else "⚪")
+                    lines.append(f"{icon} **{t}**: {e['ensemble_score']:+.3f} ({e['direction']}) "
+                                 f"conf={e['confidence']:.2f} ↑{e['long_modules']}↓{e['short_modules']}")
+                return "\n".join(lines)
+            return "No ensemble data available. Run quant-aggregator to generate scores."
+        
+        # "What positions are open?"
+        if "position" in q or "open" in q or "portfolio" in q:
+            pos = ctx["positions"]
+            if pos:
+                lines = [f"**{len(pos)} open positions:**\n"]
+                for p in pos[:10]:
+                    lines.append(f"- {p['symbol']}: {p['shares']:.2f} @ ${p['entry_price']:,.2f} "
+                                 f"(signal: {p.get('entry_signal','?')})")
+                return "\n".join(lines)
+            return "No open positions."
+        
+        # Default: show what's available
+        return ("I can answer questions about:\n\n"
+                "- **Why is [ticker] showing [direction]?** — e.g. 'Why is BTC bullish?'\n"
+                "- **What's the current regime?**\n"
+                "- **Compare [A] vs [B]** — e.g. 'Compare BTC vs ETH'\n"
+                "- **Show ensemble scores** — full ranking\n"
+                "- **What positions are open?**\n\n"
+                f"Current regime: **{ctx['regime']}** | {len(ctx['recommendations'])} tickers in edge generator "
+                f"| {len(ctx['ensemble'])} in ensemble model")
+    
+    # Initialize chat history
+    if "edge_chat_history" not in st.session_state:
+        st.session_state.edge_chat_history = []
+    
+    # Display chat
+    for msg in st.session_state.edge_chat_history[-10:]:
+        with st.chat_message(msg["role"]):
+            st.write(msg["content"])
+    
+    # Input
+    if prompt := st.chat_input("Ask about edges, regime, or signals...", key="edge_chat"):
+        st.session_state.edge_chat_history.append({"role": "user", "content": prompt})
+        response = answer_edge(prompt, edge_ctx)
+        st.session_state.edge_chat_history.append({"role": "assistant", "content": response})
+        st.rerun()
+
+# ══════════════════════════════════════════════════════════════════════
+# TAB 5: ANALYTICS
+# ══════════════════════════════════════════════════════════════════════
+with tabs[5]:
+    st.subheader("Analytics")
+    
+    # Signal production
+    st.caption("**Signal Production Rate**")
+    by_thesis = {}
+    for s in d["siglog"]:
+        th = s["thesis_id"] or "unknown"
+        if th not in by_thesis: by_thesis[th] = {"checks":0,"fired":0,"execd":0}
+        by_thesis[th]["checks"] += 1
+        if s["triggered"]: by_thesis[th]["fired"] += 1
+        if s["executed"]: by_thesis[th]["execd"] += 1
+    
+    arows = []
+    for th, stats in sorted(by_thesis.items()):
+        arows.append({
+            "Thesis": th, "Checks": stats["checks"],
+            "Fired": stats["fired"], "Rate": f"{stats['fired']/max(stats['checks'],1)*100:.0f}%",
+            "Executed": stats["execd"],
+        })
+    if arows:
+        st.dataframe(pd.DataFrame(arows), hide_index=True, use_container_width=True)
+    
+    # Deployment by thesis
+    st.caption("**Capital Deployment by Thesis**")
+    dep_by = {}
+    for p in d["positions"]:
+        th = p.get("thesis","other")
+        dep_by[th] = dep_by.get(th,0) + p["entry_price"]*p["shares"]
+    drows = [{"Thesis": THESIS_LABEL.get(th,th), "Deployed": f"${v:,.0f}", "Share": f"{v/d['deployed']*100:.0f}%"} for th,v in sorted(dep_by.items())]
+    st.dataframe(pd.DataFrame(drows), hide_index=True, use_container_width=True)
+    
+    # Quant module status
+    st.caption("**Quant Module Health**")
+    qmods = d["quant"].get("modules_ran",[])
+    if qmods:
+        qrows = [{"Module": m["name"], "Status": "✅" if m["status"]=="ok" else f"❌ {m.get('error','')[:40]}"} for m in qmods]
+        st.dataframe(pd.DataFrame(qrows), hide_index=True, use_container_width=True)
+
+# ══════════════════════════════════════════════════════════════════════
+# TAB 6: CHANGELOG
+# ══════════════════════════════════════════════════════════════════════
+with tabs[6]:
+    st.subheader("Version History")
+    audit_path = TRADING / "VERSION_AUDIT.md"
+    if audit_path.exists():
+        content = audit_path.read_text()
+        # Show last 200 lines
+        lines = content.split("\n")
+        st.markdown("\n".join(lines[-200:]))
+    else:
+        st.caption("VERSION_AUDIT.md not found.")
+
+# ── Auto-refresh ─────────────────────────────────────────────────────
+st.markdown('<script>setTimeout(function(){window.location.reload()},20000);</script>', unsafe_allow_html=True)

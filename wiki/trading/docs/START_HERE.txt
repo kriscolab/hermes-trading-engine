@@ -1,0 +1,60 @@
+╔══════════════════════════════════════════════════════════════╗
+║           HERMES TRADING PLATFORM — QUICK START             ║
+╚══════════════════════════════════════════════════════════════╝
+
+  PLATFORM:  v8h (complete)
+  THESES:    3 live (commodity · AI · crypto)
+  SIGNALS:   29 executable
+  CRONS:     14 active
+  PORTFOLIO: $100K paper · 1 active position
+
+────────────────────────────────────────────────────────────
+
+  1. FETCH PRICES
+
+     cd ~/vault/wiki/trading
+     python3 scripts/fetch-prices.py --portfolio
+
+  2. CHECK SIGNALS (Commodity)
+
+     cd paper-trader
+     python3 engine.py --thesis commodity --data /tmp/live_market_data.json
+
+  3. SEE PORTFOLIO
+
+     python3 engine.py --summary --prices '{"GLD":417.29}'
+
+  4. CHECK ALL THESES
+
+     python3 engine.py --thesis ai --data /tmp/live_market_data.json
+     python3 engine.py --thesis crypto --data /tmp/live_market_data.json
+
+  5. RUN SANITY AUDIT
+
+     cd ~/vault/wiki/trading
+     python3 synthesis/sanity-audit.py --summary
+
+────────────────────────────────────────────────────────────
+
+  DAILY OUTPUTS → @hermestradingdesk (Telegram)
+
+    7:30 AM  Airdrop ranking
+    9:00 AM  Commodity signal check + confluence + portfolio
+    9:15 AM  AI signal check
+    9:20 AM  Crypto signal check
+
+  WEEKLY OUTPUTS → @hermestradingdesk (Sunday)
+
+    8:00 PM  Commodity tracker (Mun7 vs Mag7)
+    8:30 PM  AI tracker (ETF basket)
+    8:45 PM  Crypto tracker
+    9:00 PM  Weekly review / learnings
+    9:15 PM  Cross-thesis correlation
+    9:30 PM  Missed opportunity audit
+
+────────────────────────────────────────────────────────────
+
+  NEED API KEYS?  See MASTER_GUIDE.md
+  FULL COMMANDS?  See QUICK_REFERENCE.md
+  ARCHITECTURE?   See ARCHITECTURE.md
+  NAVIGATION?     See INDEX.md
